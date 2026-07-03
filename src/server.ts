@@ -1,3 +1,4 @@
+import cors from "cors";
 import express from "express";
 import {
   invalidCredentialsResponse,
@@ -6,11 +7,51 @@ import {
 import { loginSchema, registerSchema } from "./schemas/auth.js";
 
 const app = express();
+const allowedOrigins = [
+  "http://127.0.0.1:5173",
+  "http://localhost:5173",
+  "http://127.0.0.1:4173",
+  "http://localhost:4173"
+];
 
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error("Not allowed by CORS"));
+    }
+  })
+);
 app.use(express.json());
 
 app.get("/health", (_request, response) => {
-  response.json({ ok: true });
+  response.json({
+    ok: true,
+    service: "potatoland-backend",
+    version: "0.1.0",
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get("/app/summary", (_request, response) => {
+  response.json({
+    project: "Potatoland",
+    phase: "MVP scaffold",
+    passwordPolicy: {
+      minLength: 8,
+      maxLength: 100,
+      complexityRequired: false
+    },
+    contentPolicy: {
+      rendering: "plain_text",
+      htmlInput: false,
+      markdown: false
+    }
+  });
 });
 
 app.post("/auth/register", (request, response) => {
