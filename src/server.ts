@@ -42,7 +42,7 @@ app.get("/app/summary", (_request, response) => {
     project: "Potatoland",
     phase: "MVP scaffold",
     passwordPolicy: {
-      minLength: 8,
+      minLength: 4,
       maxLength: 100,
       complexityRequired: false
     },

@@ -16,6 +16,6 @@ export const validationErrorResponse: ApiErrorResponse = {
 };
 
 export const invalidCredentialsResponse: ApiErrorResponse = {
-  message: "이메일 또는 비밀번호가 올바르지 않습니다.",
+  message: "닉네임 또는 비밀번호가 올바르지 않습니다.",
   code: apiErrorCodes.invalidCredentials
 };
