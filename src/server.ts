@@ -19,6 +19,7 @@ const allowedOrigins = [
   "http://localhost:5175",
   "http://127.0.0.1:4173",
   "http://localhost:4173",
+  "https://potatoland.vercel.app",
   "https://potatoland-frontend.onrender.com"
 ];
 const defaultExpiryDays = 7;
