@@ -1,12 +1,14 @@
-# Potatoland Backend
+# 감자랜드 Backend
 
-Express backend for Potatoland.
+Express backend for the anonymous 감자랜드 board.
 
-## Security Notes
+## Product Notes
 
-- Password validation checks length only: 4 to 100 characters.
+- Posts are created with an `expiryDays` value.
+- The API hides expired posts and periodically purges them.
+- Comments are embedded under their post, so they are deleted together when the post expires.
+- Direct user deletion is intentionally not exposed.
 - Validation failures return `VALIDATION_ERROR`.
-- Login failures return a single `INVALID_CREDENTIALS` response to avoid account enumeration.
 
 ## Scripts
 
@@ -21,5 +23,7 @@ Useful local endpoints:
 
 - `GET /health`
 - `GET /app/summary`
-- `POST /auth/register`
-- `POST /auth/login`
+- `GET /posts`
+- `GET /posts/:id`
+- `POST /posts`
+- `POST /posts/:id/comments`
