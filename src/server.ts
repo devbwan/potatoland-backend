@@ -186,7 +186,7 @@ const ensureUser = async (nickname: string) => {
         isAdmin: nickname === rootAdminNickname,
       },
     },
-    { new: true, upsert: true },
+    { returnDocument: "after", upsert: true },
   );
 
   return user;
@@ -319,7 +319,7 @@ app.get("/posts/:id", async (request, response, next) => {
     const post = await PostModel.findOneAndUpdate(
       { _id: request.params.id, expiresAt: { $gt: new Date() } },
       { $inc: { viewCount: 1 } },
-      { new: true },
+      { returnDocument: "after" },
     ).lean<PostDocument | null>();
 
     if (!post) {
@@ -382,7 +382,7 @@ app.post("/posts/:id/comments", async (request, response, next) => {
     const post = await PostModel.findOneAndUpdate(
       { _id: request.params.id, expiresAt: { $gt: new Date() } },
       { $push: { comments: comment } },
-      { new: true },
+      { returnDocument: "after" },
     ).lean<PostDocument | null>();
 
     if (!post) {
@@ -459,7 +459,7 @@ app.delete("/posts/:postId/comments/:commentId", async (request, response, next)
         expiresAt: { $gt: new Date() },
       },
       { $pull: { comments: { _id: request.params.commentId } } },
-      { new: true },
+      { returnDocument: "after" },
     ).lean<PostDocument | null>();
 
     if (!post) {
@@ -586,7 +586,7 @@ app.patch("/nicknames", async (request, response, next) => {
           lastSeenAt: new Date(),
         },
       },
-      { new: true, upsert: true },
+      { returnDocument: "after", upsert: true },
     );
 
     response.json({
@@ -652,7 +652,7 @@ app.patch("/users/:nickname/admin", async (request, response, next) => {
           nickname: targetNickname,
         },
       },
-      { new: true, upsert: true },
+      { returnDocument: "after", upsert: true },
     );
 
     response.json(serializeUser(user));
