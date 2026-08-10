@@ -5,7 +5,7 @@ Express backend for the anonymous 감자랜드 board.
 ## Product Notes
 
 - Posts are created with an `expiryDays` value.
-- The API hides expired posts and periodically purges them.
+- Expired posts are hidden by the API and removed by MongoDB TTL on `expiresAt`.
 - Comments are embedded under their post, so they are deleted together when the post expires.
 - Direct user deletion is intentionally not exposed.
 - Validation failures return `VALIDATION_ERROR`.
@@ -18,6 +18,12 @@ npm run dev
 ```
 
 The API runs on `http://127.0.0.1:4000` by default.
+
+## Render
+
+- Build Command: `npm install && npm run build`
+- Start Command: `npm start` or `node dist/index.js`
+- Environment Variable: `DATABASE_URL`
 
 Useful local endpoints:
 
