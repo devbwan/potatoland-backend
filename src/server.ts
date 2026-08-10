@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import cors from "cors";
 import express from "express";
 import mongoose, { InferSchemaType, Schema } from "mongoose";
@@ -28,6 +29,7 @@ const allowedOriginPatterns = [
 const rootAdminNickname = "짱구";
 const defaultExpiryDays = 3;
 const maxExpiryDays = 7;
+const pinSalt = process.env.PIN_SALT ?? "potatoland-local-pin-salt";
 
 const commentSchema = new Schema(
   {
@@ -79,6 +81,7 @@ const userSchema = new Schema(
       maxlength: 30,
       unique: true,
     },
+    pinHash: { type: String, default: "" },
     isAdmin: { type: Boolean, default: false },
     lastSeenAt: { type: Date, default: Date.now },
   },
@@ -117,9 +120,7 @@ const nicknameAvailabilitySchema = z.object({
   nickname: nicknameSchema,
 });
 
-const claimNicknameSchema = z.object({
-  nickname: nicknameSchema,
-});
+const claimNicknameSchema = registerSchema;
 
 const changeNicknameSchema = z
   .object({
@@ -141,6 +142,15 @@ const adminGrantSchema = z.object({
 });
 
 const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000);
+
+const hashPin = (pin: string) =>
+  crypto.createHash("sha256").update(`${pinSalt}:${pin}`).digest("hex");
+
+const hasPin = (user: Pick<UserDocument, "pinHash"> | null | undefined) =>
+  Boolean(user?.pinHash);
+
+const canUsePin = (user: Pick<UserDocument, "pinHash">, pin: string) =>
+  hasPin(user) && user.pinHash === hashPin(pin);
 
 const serializePost = (post: PostDocument) => ({
   id: post._id.toString(),
@@ -184,6 +194,7 @@ const ensureUser = async (nickname: string) => {
       $setOnInsert: {
         nickname,
         isAdmin: false,
+        pinHash: "",
       },
     },
     { returnDocument: "after", upsert: true },
@@ -202,6 +213,7 @@ const ensureRootAdmin = async () => {
       },
       $setOnInsert: {
         nickname: rootAdminNickname,
+        pinHash: "",
       },
     },
     { returnDocument: "after", upsert: true },
@@ -209,8 +221,8 @@ const ensureRootAdmin = async () => {
 };
 
 const getRequesterAdmin = async (requester: string) => {
-  const user = await ensureUser(requester);
-  return user.isAdmin;
+  const user = await UserModel.findOne({ nickname: requester, pinHash: { $ne: "" } });
+  return Boolean(user?.isAdmin);
 };
 
 const requireAdmin = async (
@@ -240,6 +252,79 @@ const syncUsersFromContent = async () => {
   );
 
   await Promise.all(nicknames.map((nickname) => ensureUser(nickname)));
+};
+
+const requireRegisteredUser = async (
+  nickname: string,
+  response: express.Response,
+) => {
+  const user = await UserModel.findOneAndUpdate(
+    { nickname, pinHash: { $ne: "" } },
+    { $set: { lastSeenAt: new Date() } },
+    { returnDocument: "after" },
+  );
+
+  if (!user) {
+    response.status(401).json({
+      message: "가입 또는 로그인 후 이용해 주세요.",
+      code: "LOGIN_REQUIRED",
+    });
+    return null;
+  }
+
+  return user;
+};
+
+const registerNicknameWithPin = async (
+  input: { nickname: string; pin: string },
+  response: express.Response,
+) => {
+  const existingUser = await UserModel.findOne({ nickname: input.nickname });
+
+  if (existingUser && hasPin(existingUser)) {
+    response.status(409).json({
+      message: "이미 가입된 닉네임입니다. 로그인해 주세요.",
+      code: "NICKNAME_ALREADY_EXISTS",
+    });
+    return null;
+  }
+
+  const hasLegacyContent = Boolean(
+    await PostModel.exists({
+      expiresAt: { $gt: new Date() },
+      $or: [
+        { author: input.nickname },
+        { "comments.author": input.nickname },
+      ],
+    }),
+  );
+
+  if (!existingUser && hasLegacyContent) {
+    const user = await UserModel.create({
+      nickname: input.nickname,
+      pinHash: hashPin(input.pin),
+      isAdmin: input.nickname === rootAdminNickname,
+      lastSeenAt: new Date(),
+    });
+    return user;
+  }
+
+  const user = await UserModel.findOneAndUpdate(
+    { nickname: input.nickname },
+    {
+      $set: {
+        pinHash: hashPin(input.pin),
+        lastSeenAt: new Date(),
+      },
+      $setOnInsert: {
+        nickname: input.nickname,
+        isAdmin: input.nickname === rootAdminNickname,
+      },
+    },
+    { returnDocument: "after", upsert: true },
+  );
+
+  return user;
 };
 
 const isAllowedOrigin = (origin: string) => {
@@ -360,13 +445,15 @@ app.post("/posts", async (request, response, next) => {
       return;
     }
 
+    const author = await requireRegisteredUser(result.data.author, response);
+    if (!author) return;
+
     const post = await PostModel.create({
       title: result.data.title,
       content: result.data.content,
       author: result.data.author,
       expiresAt: daysFromNow(result.data.expiryDays),
     });
-    await ensureUser(result.data.author);
 
     response.status(201).json(serializePost(post.toObject() as PostDocument));
   } catch (error) {
@@ -388,13 +475,15 @@ app.post("/posts/:id/comments", async (request, response, next) => {
       return;
     }
 
+    const author = await requireRegisteredUser(result.data.author, response);
+    if (!author) return;
+
     const comment = {
       _id: new mongoose.Types.ObjectId(),
       author: result.data.author,
       content: result.data.content,
       createdAt: new Date(),
     };
-    await ensureUser(result.data.author);
 
     const post = await PostModel.findOneAndUpdate(
       { _id: request.params.id, expiresAt: { $gt: new Date() } },
@@ -520,36 +609,8 @@ app.post("/nicknames/claim", async (request, response, next) => {
       return;
     }
 
-    const existingUser = await UserModel.findOne({ nickname: result.data.nickname });
-    const isTaken = Boolean(
-      existingUser ||
-        (await PostModel.exists({
-          expiresAt: { $gt: new Date() },
-          $or: [
-            { author: result.data.nickname },
-            { "comments.author": result.data.nickname },
-          ],
-        })),
-    );
-
-    if (isTaken) {
-      if (existingUser?.nickname === rootAdminNickname) {
-        response.status(200).json(serializeUser(existingUser));
-        return;
-      }
-
-      response.status(409).json({
-        message: "이미 사용 중인 닉네임입니다.",
-        code: "NICKNAME_ALREADY_EXISTS",
-      });
-      return;
-    }
-
-    const user = await UserModel.create({
-      nickname: result.data.nickname,
-      isAdmin: false,
-      lastSeenAt: new Date(),
-    });
+    const user = await registerNicknameWithPin(result.data, response);
+    if (!user) return;
 
     response.status(201).json(serializeUser(user));
   } catch (error) {
@@ -566,7 +627,15 @@ app.get("/nicknames/profile", async (request, response, next) => {
       return;
     }
 
-    const user = await ensureUser(result.data.nickname);
+    const user = await UserModel.findOne({ nickname: result.data.nickname, pinHash: { $ne: "" } });
+    if (!user) {
+      response.status(404).json({
+        message: "로그인이 필요합니다.",
+        code: "LOGIN_REQUIRED",
+      });
+      return;
+    }
+
     response.json(serializeUser(user));
   } catch (error) {
     next(error);
@@ -587,6 +656,9 @@ app.patch("/nicknames", async (request, response, next) => {
     }
 
     const { currentNickname, newNickname } = result.data;
+    const currentUser = await requireRegisteredUser(currentNickname, response);
+    if (!currentUser) return;
+
     const isTaken = await nicknameExists(newNickname);
 
     if (isTaken) {
@@ -606,19 +678,25 @@ app.patch("/nicknames", async (request, response, next) => {
       { $set: { "comments.$[comment].author": newNickname } },
       { arrayFilters: [{ "comment.author": currentNickname }] },
     );
-    const existingUser = await UserModel.findOne({ nickname: currentNickname });
-    const nextIsAdmin = existingUser?.isAdmin ?? false;
     const user = await UserModel.findOneAndUpdate(
       { nickname: currentNickname },
       {
         $set: {
           nickname: newNickname,
-          isAdmin: nextIsAdmin,
+          isAdmin: currentNickname === rootAdminNickname ? true : currentUser.isAdmin,
           lastSeenAt: new Date(),
         },
       },
-      { returnDocument: "after", upsert: true },
+      { returnDocument: "after" },
     );
+
+    if (!user) {
+      response.status(404).json({
+        message: "닉네임 정보를 찾을 수 없습니다.",
+        code: "USER_NOT_FOUND",
+      });
+      return;
+    }
 
     response.json({
       nickname: newNickname,
@@ -692,28 +770,48 @@ app.patch("/users/:nickname/admin", async (request, response, next) => {
   }
 });
 
-app.post("/auth/register", (request, response) => {
-  const result = registerSchema.safeParse(request.body);
+app.post("/auth/register", async (request, response, next) => {
+  try {
+    const result = registerSchema.safeParse(request.body);
 
-  if (!result.success) {
-    console.debug("register validation failed", result.error.flatten());
-    response.status(400).json(validationErrorResponse);
-    return;
+    if (!result.success) {
+      console.debug("register validation failed", result.error.flatten());
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    const user = await registerNicknameWithPin(result.data, response);
+    if (!user) return;
+
+    response.status(201).json(serializeUser(user));
+  } catch (error) {
+    next(error);
   }
-
-  response.status(201).json({ message: "닉네임이 확인되었습니다." });
 });
 
-app.post("/auth/login", (request, response) => {
-  const result = loginSchema.safeParse(request.body);
+app.post("/auth/login", async (request, response, next) => {
+  try {
+    const result = loginSchema.safeParse(request.body);
 
-  if (!result.success) {
-    console.debug("login validation failed", result.error.flatten());
-    response.status(400).json(validationErrorResponse);
-    return;
+    if (!result.success) {
+      console.debug("login validation failed", result.error.flatten());
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    const user = await UserModel.findOne({ nickname: result.data.nickname });
+    if (!user || !canUsePin(user, result.data.pin)) {
+      response.status(401).json(invalidCredentialsResponse);
+      return;
+    }
+
+    user.lastSeenAt = new Date();
+    await user.save();
+
+    response.json(serializeUser(user));
+  } catch (error) {
+    next(error);
   }
-
-  response.status(401).json(invalidCredentialsResponse);
 });
 
 app.use(

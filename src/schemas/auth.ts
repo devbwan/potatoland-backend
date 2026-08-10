@@ -1,9 +1,8 @@
 import { z } from "zod";
 
-export const passwordSchema = z
+export const pinSchema = z
   .string()
-  .min(4, "비밀번호는 4자 이상이어야 합니다.")
-  .max(100, "비밀번호는 100자 이하로 설정해야 합니다.");
+  .regex(/^\d{4}$/, "PIN은 숫자 4자리여야 합니다.");
 
 export const nicknameSchema = z
   .string()
@@ -13,12 +12,12 @@ export const nicknameSchema = z
 
 export const registerSchema = z.object({
   nickname: nicknameSchema,
-  password: passwordSchema
+  pin: pinSchema
 });
 
 export const loginSchema = z.object({
   nickname: nicknameSchema,
-  password: passwordSchema
+  pin: pinSchema
 });
 
 export type RegisterInput = z.infer<typeof registerSchema>;
