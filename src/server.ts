@@ -183,7 +183,7 @@ const ensureUser = async (nickname: string) => {
       $set: { lastSeenAt: new Date() },
       $setOnInsert: {
         nickname,
-        isAdmin: nickname === rootAdminNickname,
+        isAdmin: false,
       },
     },
     { returnDocument: "after", upsert: true },
@@ -192,9 +192,25 @@ const ensureUser = async (nickname: string) => {
   return user;
 };
 
+const ensureRootAdmin = async () => {
+  await UserModel.findOneAndUpdate(
+    { nickname: rootAdminNickname },
+    {
+      $set: {
+        isAdmin: true,
+        lastSeenAt: new Date(),
+      },
+      $setOnInsert: {
+        nickname: rootAdminNickname,
+      },
+    },
+    { returnDocument: "after", upsert: true },
+  );
+};
+
 const getRequesterAdmin = async (requester: string) => {
   const user = await ensureUser(requester);
-  return user.isAdmin || user.nickname === rootAdminNickname;
+  return user.isAdmin;
 };
 
 const requireAdmin = async (
@@ -242,6 +258,7 @@ const connectDatabase = async () => {
   }
 
   await mongoose.connect(databaseUrl);
+  await ensureRootAdmin();
 };
 
 app.use(
@@ -503,9 +520,24 @@ app.post("/nicknames/claim", async (request, response, next) => {
       return;
     }
 
-    const isTaken = await nicknameExists(result.data.nickname);
+    const existingUser = await UserModel.findOne({ nickname: result.data.nickname });
+    const isTaken = Boolean(
+      existingUser ||
+        (await PostModel.exists({
+          expiresAt: { $gt: new Date() },
+          $or: [
+            { author: result.data.nickname },
+            { "comments.author": result.data.nickname },
+          ],
+        })),
+    );
 
     if (isTaken) {
+      if (existingUser?.nickname === rootAdminNickname) {
+        response.status(200).json(serializeUser(existingUser));
+        return;
+      }
+
       response.status(409).json({
         message: "이미 사용 중인 닉네임입니다.",
         code: "NICKNAME_ALREADY_EXISTS",
@@ -515,7 +547,7 @@ app.post("/nicknames/claim", async (request, response, next) => {
 
     const user = await UserModel.create({
       nickname: result.data.nickname,
-      isAdmin: result.data.nickname === rootAdminNickname,
+      isAdmin: false,
       lastSeenAt: new Date(),
     });
 
@@ -575,8 +607,7 @@ app.patch("/nicknames", async (request, response, next) => {
       { arrayFilters: [{ "comment.author": currentNickname }] },
     );
     const existingUser = await UserModel.findOne({ nickname: currentNickname });
-    const nextIsAdmin =
-      newNickname === rootAdminNickname ? true : (existingUser?.isAdmin ?? false);
+    const nextIsAdmin = existingUser?.isAdmin ?? false;
     const user = await UserModel.findOneAndUpdate(
       { nickname: currentNickname },
       {
@@ -591,7 +622,7 @@ app.patch("/nicknames", async (request, response, next) => {
 
     response.json({
       nickname: newNickname,
-      isAdmin: user.isAdmin || user.nickname === rootAdminNickname,
+      isAdmin: user.isAdmin,
       updatedPosts: postUpdate.modifiedCount,
       updatedCommentThreads: commentUpdate.modifiedCount,
     });
@@ -645,7 +676,7 @@ app.patch("/users/:nickname/admin", async (request, response, next) => {
       { nickname: targetNickname },
       {
         $set: {
-          isAdmin: result.data.isAdmin || targetNickname === rootAdminNickname,
+          isAdmin: targetNickname === rootAdminNickname ? true : result.data.isAdmin,
           lastSeenAt: new Date(),
         },
         $setOnInsert: {
