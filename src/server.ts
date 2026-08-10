@@ -5,7 +5,6 @@ import express from "express";
 import mongoose, { InferSchemaType, Schema } from "mongoose";
 import { z } from "zod";
 import {
-  invalidCredentialsResponse,
   validationErrorResponse,
 } from "./types/api-error.js";
 import { loginSchema, nicknameSchema, registerSchema } from "./schemas/auth.js";
@@ -283,7 +282,7 @@ const registerNicknameWithPin = async (
 
   if (existingUser && hasPin(existingUser)) {
     response.status(409).json({
-      message: "이미 가입된 닉네임입니다. 로그인해 주세요.",
+      message: "이미 있는 닉네임입니다.",
       code: "NICKNAME_ALREADY_EXISTS",
     });
     return null;
@@ -800,8 +799,19 @@ app.post("/auth/login", async (request, response, next) => {
     }
 
     const user = await UserModel.findOne({ nickname: result.data.nickname });
-    if (!user || !canUsePin(user, result.data.pin)) {
-      response.status(401).json(invalidCredentialsResponse);
+    if (!user || !hasPin(user)) {
+      response.status(401).json({
+        message: "일치하는 닉네임이 없습니다.",
+        code: "NICKNAME_NOT_FOUND",
+      });
+      return;
+    }
+
+    if (!canUsePin(user, result.data.pin)) {
+      response.status(401).json({
+        message: "PIN번호가 일치하지 않습니다.",
+        code: "PIN_MISMATCH",
+      });
       return;
     }
 
