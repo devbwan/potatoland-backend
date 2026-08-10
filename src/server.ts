@@ -5,7 +5,7 @@ import mongoose, { InferSchemaType, Schema } from "mongoose";
 import { z } from "zod";
 import {
   invalidCredentialsResponse,
-  validationErrorResponse
+  validationErrorResponse,
 } from "./types/api-error.js";
 import { loginSchema, nicknameSchema, registerSchema } from "./schemas/auth.js";
 
@@ -20,21 +20,25 @@ const allowedOrigins = [
   "http://127.0.0.1:4173",
   "http://localhost:4173",
   "https://potatoland.vercel.app",
-  "https://potatoland-frontend.onrender.com"
+  "https://potatoland-frontend.onrender.com",
 ];
-const allowedOriginPatterns = [/^https:\/\/potatoland(?:-[a-z0-9-]+)*\.vercel\.app$/i];
-const defaultExpiryDays = 7;
+const allowedOriginPatterns = [
+  /^https:\/\/potatoland(?:-[a-z0-9-]+)*\.vercel\.app$/i,
+];
+const rootAdminNickname = "짱구";
+const defaultExpiryDays = 3;
+const maxExpiryDays = 7;
 
 const commentSchema = new Schema(
   {
     author: { type: String, required: true, trim: true, maxlength: 30 },
     content: { type: String, required: true, trim: true, maxlength: 500 },
-    createdAt: { type: Date, default: Date.now }
+    createdAt: { type: Date, default: Date.now },
   },
   {
     _id: true,
-    versionKey: false
-  }
+    versionKey: false,
+  },
 );
 
 const postSchema = new Schema(
@@ -44,12 +48,12 @@ const postSchema = new Schema(
     author: { type: String, required: true, trim: true, maxlength: 30 },
     viewCount: { type: Number, default: 0, min: 0 },
     expiresAt: { type: Date, required: true, index: { expires: 0 } },
-    comments: { type: [commentSchema], default: [] }
+    comments: { type: [commentSchema], default: [] },
   },
   {
     timestamps: true,
-    versionKey: false
-  }
+    versionKey: false,
+  },
 );
 
 type PostDocument = InferSchemaType<typeof postSchema> & {
@@ -66,31 +70,75 @@ type PostDocument = InferSchemaType<typeof postSchema> & {
 
 const PostModel = mongoose.model("Post", postSchema);
 
+const userSchema = new Schema(
+  {
+    nickname: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 30,
+      unique: true,
+    },
+    isAdmin: { type: Boolean, default: false },
+    lastSeenAt: { type: Date, default: Date.now },
+  },
+  {
+    timestamps: true,
+    versionKey: false,
+  },
+);
+
+type UserDocument = InferSchemaType<typeof userSchema> & {
+  _id: mongoose.Types.ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+const UserModel = mongoose.model("User", userSchema);
+
 const createPostSchema = z.object({
   title: z.string().trim().min(1).max(80),
   content: z.string().trim().min(1).max(1000),
   author: z.string().trim().min(1).max(30),
-  expiryDays: z.coerce.number().int().min(1).max(30).default(defaultExpiryDays)
+  expiryDays: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(maxExpiryDays)
+    .default(defaultExpiryDays),
 });
 
 const createCommentSchema = z.object({
   author: z.string().trim().min(1).max(30),
-  content: z.string().trim().min(1).max(500)
+  content: z.string().trim().min(1).max(500),
 });
 
 const nicknameAvailabilitySchema = z.object({
-  nickname: nicknameSchema
+  nickname: nicknameSchema,
+});
+
+const claimNicknameSchema = z.object({
+  nickname: nicknameSchema,
 });
 
 const changeNicknameSchema = z
   .object({
     currentNickname: nicknameSchema,
-    newNickname: nicknameSchema
+    newNickname: nicknameSchema,
   })
   .refine((data) => data.currentNickname !== data.newNickname, {
     message: "현재 닉네임과 다른 닉네임을 입력해 주세요.",
-    path: ["newNickname"]
+    path: ["newNickname"],
   });
+
+const requesterSchema = z.object({
+  requester: nicknameSchema,
+});
+
+const adminGrantSchema = z.object({
+  requester: nicknameSchema,
+  isAdmin: z.boolean(),
+});
 
 const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000);
 
@@ -106,18 +154,77 @@ const serializePost = (post: PostDocument) => ({
     id: comment._id.toString(),
     author: comment.author,
     content: comment.content,
-    createdAt: comment.createdAt.toISOString()
+    createdAt: comment.createdAt.toISOString(),
   })),
-  commentCount: post.comments.length
+  commentCount: post.comments.length,
+});
+
+const serializeUser = (user: UserDocument) => ({
+  id: user._id.toString(),
+  nickname: user.nickname,
+  isAdmin: user.isAdmin,
+  createdAt: user.createdAt.toISOString(),
+  updatedAt: user.updatedAt.toISOString(),
 });
 
 const nicknameExists = async (nickname: string) =>
   Boolean(
-    await PostModel.exists({
-      expiresAt: { $gt: new Date() },
-      $or: [{ author: nickname }, { "comments.author": nickname }]
-    })
+    (await UserModel.exists({ nickname })) ||
+      (await PostModel.exists({
+        expiresAt: { $gt: new Date() },
+        $or: [{ author: nickname }, { "comments.author": nickname }],
+      })),
   );
+
+const ensureUser = async (nickname: string) => {
+  const user = await UserModel.findOneAndUpdate(
+    { nickname },
+    {
+      $set: { lastSeenAt: new Date() },
+      $setOnInsert: {
+        nickname,
+        isAdmin: nickname === rootAdminNickname,
+      },
+    },
+    { new: true, upsert: true },
+  );
+
+  return user;
+};
+
+const getRequesterAdmin = async (requester: string) => {
+  const user = await ensureUser(requester);
+  return user.isAdmin || user.nickname === rootAdminNickname;
+};
+
+const requireAdmin = async (
+  requester: string,
+  response: express.Response,
+) => {
+  const isAdmin = await getRequesterAdmin(requester);
+
+  if (!isAdmin) {
+    response.status(403).json({
+      message: "운영자 권한이 필요합니다.",
+      code: "ADMIN_REQUIRED",
+    });
+    return false;
+  }
+
+  return true;
+};
+
+const syncUsersFromContent = async () => {
+  const [postAuthors, commentAuthors] = await Promise.all([
+    PostModel.distinct("author", { expiresAt: { $gt: new Date() } }),
+    PostModel.distinct("comments.author", { expiresAt: { $gt: new Date() } }),
+  ]);
+  const nicknames = Array.from(new Set([...postAuthors, ...commentAuthors])).filter(
+    (nickname): nickname is string => typeof nickname === "string" && nickname.trim().length > 0,
+  );
+
+  await Promise.all(nicknames.map((nickname) => ensureUser(nickname)));
+};
 
 const isAllowedOrigin = (origin: string) => {
   const normalizedOrigin = origin.replace(/\/$/, "");
@@ -147,18 +254,19 @@ app.use(
 
       console.warn(`Blocked CORS origin: ${origin}`);
       callback(null, false);
-    }
-  })
+    },
+  }),
 );
 app.use(express.json());
 
 app.get("/health", (_request, response) => {
   response.json({
     ok: true,
-    database: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+    database:
+      mongoose.connection.readyState === 1 ? "connected" : "disconnected",
     service: "potatoland-backend",
     version: "0.1.0",
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 });
 
@@ -169,19 +277,23 @@ app.get("/app/summary", (_request, response) => {
     database: "mongodb",
     nicknamePolicy: {
       requiredOnFirstVisit: true,
-      storage: "session"
+      storage: "session",
     },
     expirationPolicy: {
       label: "N일 뒤 자동 삭제",
       defaultDays: defaultExpiryDays,
-      allowedDays: [1, 3, 7, 14, 30],
-      comments: "게시글이 삭제되면 댓글도 함께 삭제됩니다."
+      allowedDays: [1, 3, 7],
+      comments: "게시글이 삭제되면 댓글도 함께 삭제됩니다.",
+    },
+    adminPolicy: {
+      rootAdminNickname,
+      permissions: ["delete_posts", "delete_comments", "grant_admin"],
     },
     contentPolicy: {
       rendering: "plain_text",
       htmlInput: false,
-      markdown: false
-    }
+      markdown: false,
+    },
   });
 });
 
@@ -207,7 +319,7 @@ app.get("/posts/:id", async (request, response, next) => {
     const post = await PostModel.findOneAndUpdate(
       { _id: request.params.id, expiresAt: { $gt: new Date() } },
       { $inc: { viewCount: 1 } },
-      { new: true }
+      { new: true },
     ).lean<PostDocument | null>();
 
     if (!post) {
@@ -235,8 +347,9 @@ app.post("/posts", async (request, response, next) => {
       title: result.data.title,
       content: result.data.content,
       author: result.data.author,
-      expiresAt: daysFromNow(result.data.expiryDays)
+      expiresAt: daysFromNow(result.data.expiryDays),
     });
+    await ensureUser(result.data.author);
 
     response.status(201).json(serializePost(post.toObject() as PostDocument));
   } catch (error) {
@@ -262,13 +375,14 @@ app.post("/posts/:id/comments", async (request, response, next) => {
       _id: new mongoose.Types.ObjectId(),
       author: result.data.author,
       content: result.data.content,
-      createdAt: new Date()
+      createdAt: new Date(),
     };
+    await ensureUser(result.data.author);
 
     const post = await PostModel.findOneAndUpdate(
       { _id: request.params.id, expiresAt: { $gt: new Date() } },
       { $push: { comments: comment } },
-      { new: true }
+      { new: true },
     ).lean<PostDocument | null>();
 
     if (!post) {
@@ -280,8 +394,80 @@ app.post("/posts/:id/comments", async (request, response, next) => {
       id: comment._id.toString(),
       author: comment.author,
       content: comment.content,
-      createdAt: comment.createdAt.toISOString()
+      createdAt: comment.createdAt.toISOString(),
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/posts/:id", async (request, response, next) => {
+  try {
+    const requesterResult = requesterSchema.safeParse(request.query);
+
+    if (!requesterResult.success) {
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    if (!(await requireAdmin(requesterResult.data.requester, response))) return;
+
+    if (!mongoose.isValidObjectId(request.params.id)) {
+      response.status(404).json({ message: "게시글을 찾을 수 없습니다." });
+      return;
+    }
+
+    const deletedPost = await PostModel.findOneAndDelete({
+      _id: request.params.id,
+      expiresAt: { $gt: new Date() },
+    });
+
+    if (!deletedPost) {
+      response.status(404).json({ message: "게시글을 찾을 수 없습니다." });
+      return;
+    }
+
+    response.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/posts/:postId/comments/:commentId", async (request, response, next) => {
+  try {
+    const requesterResult = requesterSchema.safeParse(request.query);
+
+    if (!requesterResult.success) {
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    if (!(await requireAdmin(requesterResult.data.requester, response))) return;
+
+    if (
+      !mongoose.isValidObjectId(request.params.postId) ||
+      !mongoose.isValidObjectId(request.params.commentId)
+    ) {
+      response.status(404).json({ message: "댓글을 찾을 수 없습니다." });
+      return;
+    }
+
+    const post = await PostModel.findOneAndUpdate(
+      {
+        _id: request.params.postId,
+        "comments._id": request.params.commentId,
+        expiresAt: { $gt: new Date() },
+      },
+      { $pull: { comments: { _id: request.params.commentId } } },
+      { new: true },
+    ).lean<PostDocument | null>();
+
+    if (!post) {
+      response.status(404).json({ message: "댓글을 찾을 수 없습니다." });
+      return;
+    }
+
+    response.json(serializePost(post));
   } catch (error) {
     next(error);
   }
@@ -292,7 +478,10 @@ app.post("/nicknames/availability", async (request, response, next) => {
     const result = nicknameAvailabilitySchema.safeParse(request.body);
 
     if (!result.success) {
-      console.debug("nickname availability validation failed", result.error.flatten());
+      console.debug(
+        "nickname availability validation failed",
+        result.error.flatten(),
+      );
       response.status(400).json(validationErrorResponse);
       return;
     }
@@ -304,12 +493,63 @@ app.post("/nicknames/availability", async (request, response, next) => {
   }
 });
 
+app.post("/nicknames/claim", async (request, response, next) => {
+  try {
+    const result = claimNicknameSchema.safeParse(request.body);
+
+    if (!result.success) {
+      console.debug("nickname claim validation failed", result.error.flatten());
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    const isTaken = await nicknameExists(result.data.nickname);
+
+    if (isTaken) {
+      response.status(409).json({
+        message: "이미 사용 중인 닉네임입니다.",
+        code: "NICKNAME_ALREADY_EXISTS",
+      });
+      return;
+    }
+
+    const user = await UserModel.create({
+      nickname: result.data.nickname,
+      isAdmin: result.data.nickname === rootAdminNickname,
+      lastSeenAt: new Date(),
+    });
+
+    response.status(201).json(serializeUser(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/nicknames/profile", async (request, response, next) => {
+  try {
+    const result = nicknameAvailabilitySchema.safeParse(request.query);
+
+    if (!result.success) {
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    const user = await ensureUser(result.data.nickname);
+    response.json(serializeUser(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.patch("/nicknames", async (request, response, next) => {
   try {
     const result = changeNicknameSchema.safeParse(request.body);
 
     if (!result.success) {
-      console.debug("nickname change validation failed", result.error.flatten());
+      console.debug(
+        "nickname change validation failed",
+        result.error.flatten(),
+      );
       response.status(400).json(validationErrorResponse);
       return;
     }
@@ -320,26 +560,102 @@ app.patch("/nicknames", async (request, response, next) => {
     if (isTaken) {
       response.status(409).json({
         message: "이미 사용 중인 닉네임입니다.",
-        code: "NICKNAME_ALREADY_EXISTS"
+        code: "NICKNAME_ALREADY_EXISTS",
       });
       return;
     }
 
     const postUpdate = await PostModel.updateMany(
       { author: currentNickname, expiresAt: { $gt: new Date() } },
-      { $set: { author: newNickname } }
+      { $set: { author: newNickname } },
     );
     const commentUpdate = await PostModel.updateMany(
       { "comments.author": currentNickname, expiresAt: { $gt: new Date() } },
       { $set: { "comments.$[comment].author": newNickname } },
-      { arrayFilters: [{ "comment.author": currentNickname }] }
+      { arrayFilters: [{ "comment.author": currentNickname }] },
+    );
+    const existingUser = await UserModel.findOne({ nickname: currentNickname });
+    const nextIsAdmin =
+      newNickname === rootAdminNickname ? true : (existingUser?.isAdmin ?? false);
+    const user = await UserModel.findOneAndUpdate(
+      { nickname: currentNickname },
+      {
+        $set: {
+          nickname: newNickname,
+          isAdmin: nextIsAdmin,
+          lastSeenAt: new Date(),
+        },
+      },
+      { new: true, upsert: true },
     );
 
     response.json({
       nickname: newNickname,
+      isAdmin: user.isAdmin || user.nickname === rootAdminNickname,
       updatedPosts: postUpdate.modifiedCount,
-      updatedCommentThreads: commentUpdate.modifiedCount
+      updatedCommentThreads: commentUpdate.modifiedCount,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/users", async (request, response, next) => {
+  try {
+    const requesterResult = requesterSchema.safeParse(request.query);
+
+    if (!requesterResult.success) {
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    if (!(await requireAdmin(requesterResult.data.requester, response))) return;
+
+    await syncUsersFromContent();
+    const users = await UserModel.find().sort({ isAdmin: -1, nickname: 1 });
+    response.json(users.map(serializeUser));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/users/:nickname/admin", async (request, response, next) => {
+  try {
+    const result = adminGrantSchema.safeParse(request.body);
+
+    if (!result.success) {
+      console.debug("admin grant validation failed", result.error.flatten());
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    if (!(await requireAdmin(result.data.requester, response))) return;
+
+    const targetNickname = decodeURIComponent(request.params.nickname);
+
+    if (targetNickname === rootAdminNickname && !result.data.isAdmin) {
+      response.status(400).json({
+        message: "기본 운영자 권한은 해제할 수 없습니다.",
+        code: "ROOT_ADMIN_REQUIRED",
+      });
+      return;
+    }
+
+    const user = await UserModel.findOneAndUpdate(
+      { nickname: targetNickname },
+      {
+        $set: {
+          isAdmin: result.data.isAdmin || targetNickname === rootAdminNickname,
+          lastSeenAt: new Date(),
+        },
+        $setOnInsert: {
+          nickname: targetNickname,
+        },
+      },
+      { new: true, upsert: true },
+    );
+
+    response.json(serializeUser(user));
   } catch (error) {
     next(error);
   }
@@ -374,14 +690,17 @@ app.use(
     error: unknown,
     _request: express.Request,
     response: express.Response,
-    _next: express.NextFunction
+    _next: express.NextFunction,
   ) => {
-    console.error("Unhandled server error", error instanceof Error ? error.message : error);
+    console.error(
+      "Unhandled server error",
+      error instanceof Error ? error.message : error,
+    );
     response.status(500).json({
       message: "서버 오류가 발생했습니다.",
-      code: "INTERNAL_SERVER_ERROR"
+      code: "INTERNAL_SERVER_ERROR",
     });
-  }
+  },
 );
 
 const port = Number(process.env.PORT ?? 4000);
@@ -395,7 +714,7 @@ connectDatabase()
   .catch((error) => {
     console.error(
       "Failed to connect to MongoDB",
-      error instanceof Error ? error.message : error
+      error instanceof Error ? error.message : error,
     );
     process.exit(1);
   });
