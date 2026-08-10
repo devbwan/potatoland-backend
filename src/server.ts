@@ -7,7 +7,7 @@ import {
   invalidCredentialsResponse,
   validationErrorResponse
 } from "./types/api-error.js";
-import { loginSchema, registerSchema } from "./schemas/auth.js";
+import { loginSchema, nicknameSchema, registerSchema } from "./schemas/auth.js";
 
 const app = express();
 const allowedOrigins = [
@@ -18,7 +18,8 @@ const allowedOrigins = [
   "http://127.0.0.1:5175",
   "http://localhost:5175",
   "http://127.0.0.1:4173",
-  "http://localhost:4173"
+  "http://localhost:4173",
+  "https://potatoland-frontend.onrender.com"
 ];
 const defaultExpiryDays = 7;
 
@@ -75,6 +76,20 @@ const createCommentSchema = z.object({
   content: z.string().trim().min(1).max(500)
 });
 
+const nicknameAvailabilitySchema = z.object({
+  nickname: nicknameSchema
+});
+
+const changeNicknameSchema = z
+  .object({
+    currentNickname: nicknameSchema,
+    newNickname: nicknameSchema
+  })
+  .refine((data) => data.currentNickname !== data.newNickname, {
+    message: "현재 닉네임과 다른 닉네임을 입력해 주세요.",
+    path: ["newNickname"]
+  });
+
 const daysFromNow = (days: number) => new Date(Date.now() + days * 86_400_000);
 
 const serializePost = (post: PostDocument) => ({
@@ -93,6 +108,14 @@ const serializePost = (post: PostDocument) => ({
   })),
   commentCount: post.comments.length
 });
+
+const nicknameExists = async (nickname: string) =>
+  Boolean(
+    await PostModel.exists({
+      expiresAt: { $gt: new Date() },
+      $or: [{ author: nickname }, { "comments.author": nickname }]
+    })
+  );
 
 const connectDatabase = async () => {
   const databaseUrl = process.env.DATABASE_URL;
@@ -247,6 +270,64 @@ app.post("/posts/:id/comments", async (request, response, next) => {
       author: comment.author,
       content: comment.content,
       createdAt: comment.createdAt.toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/nicknames/availability", async (request, response, next) => {
+  try {
+    const result = nicknameAvailabilitySchema.safeParse(request.body);
+
+    if (!result.success) {
+      console.debug("nickname availability validation failed", result.error.flatten());
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    const isTaken = await nicknameExists(result.data.nickname);
+    response.json({ available: !isTaken });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch("/nicknames", async (request, response, next) => {
+  try {
+    const result = changeNicknameSchema.safeParse(request.body);
+
+    if (!result.success) {
+      console.debug("nickname change validation failed", result.error.flatten());
+      response.status(400).json(validationErrorResponse);
+      return;
+    }
+
+    const { currentNickname, newNickname } = result.data;
+    const isTaken = await nicknameExists(newNickname);
+
+    if (isTaken) {
+      response.status(409).json({
+        message: "이미 사용 중인 닉네임입니다.",
+        code: "NICKNAME_ALREADY_EXISTS"
+      });
+      return;
+    }
+
+    const postUpdate = await PostModel.updateMany(
+      { author: currentNickname, expiresAt: { $gt: new Date() } },
+      { $set: { author: newNickname } }
+    );
+    const commentUpdate = await PostModel.updateMany(
+      { "comments.author": currentNickname, expiresAt: { $gt: new Date() } },
+      { $set: { "comments.$[comment].author": newNickname } },
+      { arrayFilters: [{ "comment.author": currentNickname }] }
+    );
+
+    response.json({
+      nickname: newNickname,
+      updatedPosts: postUpdate.modifiedCount,
+      updatedCommentThreads: commentUpdate.modifiedCount
     });
   } catch (error) {
     next(error);
