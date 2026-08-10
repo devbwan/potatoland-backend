@@ -22,6 +22,7 @@ const allowedOrigins = [
   "https://potatoland.vercel.app",
   "https://potatoland-frontend.onrender.com"
 ];
+const allowedOriginPatterns = [/^https:\/\/potatoland(?:-[a-z0-9-]+)*\.vercel\.app$/i];
 const defaultExpiryDays = 7;
 
 const commentSchema = new Schema(
@@ -118,6 +119,14 @@ const nicknameExists = async (nickname: string) =>
     })
   );
 
+const isAllowedOrigin = (origin: string) => {
+  const normalizedOrigin = origin.replace(/\/$/, "");
+  return (
+    allowedOrigins.includes(normalizedOrigin) ||
+    allowedOriginPatterns.some((pattern) => pattern.test(normalizedOrigin))
+  );
+};
+
 const connectDatabase = async () => {
   const databaseUrl = process.env.DATABASE_URL;
 
@@ -131,12 +140,13 @@ const connectDatabase = async () => {
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.includes(origin)) {
+      if (!origin || isAllowedOrigin(origin)) {
         callback(null, true);
         return;
       }
 
-      callback(new Error("Not allowed by CORS"));
+      console.warn(`Blocked CORS origin: ${origin}`);
+      callback(null, false);
     }
   })
 );
